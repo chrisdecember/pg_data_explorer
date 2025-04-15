@@ -1,0 +1,12 @@
+# GUI Framework
+PySide6
+
+# Database Connector
+psycopg2-binary
+
+# Data Visualization (will integrate later)
+matplotlib
+# numpy
+# pandas
+
+# Add other dependencies as needed
