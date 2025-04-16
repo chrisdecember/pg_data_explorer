@@ -27,3 +27,6 @@ dist/
 
 # Notebook Checkpoints
 .ipynb_checkpoints
+
+merge.sh
+merge.txt
