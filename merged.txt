@@ -1,0 +1,227 @@
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/main_window.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/dialogs/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/dialogs/connection_dialog.py ==========
+from PySide6 import QtWidgets, QtCore
+
+class ConnectionDialog(QtWidgets.QDialog):
+    """
+    A dialog window for entering PostgreSQL connection details.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Connect to PostgreSQL Database")
+        self.setMinimumWidth(350)
+
+        # --- Widgets ---
+        self.host_input = QtWidgets.QLineEdit("localhost")
+        self.port_input = QtWidgets.QLineEdit("5432")
+        self.db_input = QtWidgets.QLineEdit("odoo_database") # Example default
+        self.user_input = QtWidgets.QLineEdit("odoo_user")   # Example default
+        self.password_input = QtWidgets.QLineEdit()
+        self.password_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+
+        # --- Layout ---
+        form_layout = QtWidgets.QFormLayout()
+        form_layout.addRow("Host:", self.host_input)
+        form_layout.addRow("Port:", self.port_input)
+        form_layout.addRow("Database:", self.db_input)
+        form_layout.addRow("User:", self.user_input)
+        form_layout.addRow("Password:", self.password_input)
+
+        # --- Buttons ---
+        # Standard buttons for dialogs (OK, Cancel)
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept) # Connect Ok signal to accept slot
+        button_box.rejected.connect(self.reject) # Connect Cancel signal to reject slot
+
+        # Rename OK button to "Connect" for clarity
+        button_box.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Connect")
+
+
+        # --- Main Layout ---
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(button_box)
+        self.setLayout(main_layout)
+
+    def get_connection_details(self):
+        """
+        Retrieves the connection details entered by the user.
+
+        Returns:
+            dict: A dictionary containing the connection parameters.
+        """
+        return {
+            "host": self.host_input.text().strip(),
+            "port": self.port_input.text().strip(),
+            "dbname": self.db_input.text().strip(),
+            "user": self.user_input.text().strip(),
+            "password": self.password_input.text() # Don't strip password
+        }
+
+    # Override accept to add basic validation (optional but good)
+    def accept(self):
+        """Validates input before accepting the dialog."""
+        details = self.get_connection_details()
+        if not all([details["host"], details["port"], details["dbname"], details["user"]]):
+             QtWidgets.QMessageBox.warning(self, "Missing Information",
+                                           "Please fill in Host, Port, Database, and User fields.")
+             return # Stay on the dialog
+
+        # Basic port validation
+        try:
+            port_num = int(details["port"])
+            if not (0 < port_num < 65536):
+                raise ValueError("Port number out of range")
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Invalid Port",
+                                          "Please enter a valid port number (1-65535).")
+            self.port_input.setFocus() # Focus the port input
+            self.port_input.selectAll()
+            return # Stay on the dialog
+
+        # If validation passes, call the original accept method
+        super().accept()
+
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/widgets/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/database/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/database/connection.py ==========
+import psycopg2
+from psycopg2 import OperationalError
+
+# Define a custom exception for better error handling context
+class ConnectionError(Exception):
+    """Custom exception for database connection errors."""
+    pass
+
+def connect_to_db(host, port, dbname, user, password):
+    """
+    Establishes a connection to the PostgreSQL database.
+
+    Args:
+        host (str): Database host address.
+        port (str): Database port number.
+        dbname (str): Database name.
+        user (str): Username for authentication.
+        password (str): Password for authentication.
+
+    Returns:
+        psycopg2.connection: The connection object if successful.
+
+    Raises:
+        ConnectionError: If the connection fails for any reason.
+    """
+    conn = None
+    try:
+        print(f"Attempting to connect: dbname='{dbname}' user='{user}' host='{host}' port='{port}'") # Debug print
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=dbname,
+            user=user,
+            password=password,
+            connect_timeout=5 # Add a timeout (in seconds)
+        )
+        print("Connection successful!") # Debug print
+        return conn
+    except OperationalError as e:
+        # Catch specific psycopg2 connection errors
+        print(f"Connection failed: {e}") # Debug print
+        # Raise a more specific custom error
+        raise ConnectionError(f"Could not connect to database.\nDetails: {e}") from e
+    except Exception as e:
+        # Catch any other unexpected errors during connection attempt
+        print(f"An unexpected error occurred during connection: {e}") # Debug print
+        if conn:
+            conn.close() # Ensure connection is closed if partially opened
+        raise ConnectionError(f"An unexpected error occurred.\nDetails: {e}") from e
+
+# Example of how to use (for testing purposes, not typically run directly)
+if __name__ == '__main__':
+    # --- IMPORTANT ---
+    # Replace with actual test database details
+    # DO NOT COMMIT ACTUAL CREDENTIALS
+    test_details = {
+        "host": "localhost",
+        "port": "5432",
+        "dbname": "your_test_db",
+        "user": "your_test_user",
+        "password": "your_test_password"
+    }
+
+    try:
+        connection = connect_to_db(**test_details)
+        if connection:
+            print("\n--- Test Connection Successful ---")
+            print(f"Connected to PostgreSQL server version: {connection.server_version}")
+            # You can perform a simple query here if needed
+            # cur = connection.cursor()
+            # cur.execute("SELECT version();")
+            # print(cur.fetchone())
+            # cur.close()
+            connection.close()
+            print("--- Test Connection Closed ---")
+    except ConnectionError as err:
+        print(f"\n--- Test Connection Failed ---")
+        print(err)
+    except ImportError:
+        print("Error: psycopg2 library not found. Please install it: pip install psycopg2-binary")
+
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/database/odoo_helper.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/config.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/utils/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/utils/helpers.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/main.py ==========
+import sys
+from PySide6 import QtWidgets
+from data_explorer.ui.main_window import MainWindow
+
+def run():
+    """
+    Initializes and runs the Qt application.
+    """
+    # Create the Qt Application
+    app = QtWidgets.QApplication(sys.argv)
+
+    # Create and show the main window
+    window = MainWindow()
+    window.show()
+
+    # Run the application's event loop
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    # This ensures the run function is called only when the script is executed directly
+    run()
+
+
