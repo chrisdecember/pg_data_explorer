@@ -7,6 +7,7 @@ psycopg2-binary
 # Data Visualization (will integrate later)
 matplotlib
 # numpy
-# pandas
+pandas
+seaborn
 
 # Add other dependencies as needed
