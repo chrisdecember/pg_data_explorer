@@ -1,4 +1,450 @@
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/main_window.py ==========
+from PySide6 import QtWidgets, QtGui, QtCore
+from data_explorer.ui.dialogs.connection_dialog import ConnectionDialog
+from data_explorer.database.connection import connect_to_db, ConnectionError
+from data_explorer.ui.widgets.schema_browser import SchemaBrowser
+from data_explorer.ui.widgets.query_editor import QueryEditor
+from data_explorer.ui.widgets.results_view import ResultsView
+from data_explorer.config import Config  # Import the Config class
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    """
+    The main application window.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        # --- Config Handling ---
+        self.config = Config()
+        self.recent_connections = self.config.get_recent_connections()
+
+        # --- Window Setup ---
+        window_size = self.config.get("window").get("size")
+        window_pos = self.config.get("window").get("position")
+        window_maximized = self.config.get("window").get("maximized")
+
+        self.setWindowTitle("PG Data Explorer")
+        self.setGeometry(window_pos[0], window_pos[1], window_size[0], window_size[1])
+
+        if window_maximized:
+            self.setWindowState(QtCore.Qt.WindowMaximized)
+
+        # --- Central Widget ---
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+
+        # --- Layout ---
+        main_layout = QtWidgets.QVBoxLayout(central_widget)
+
+        # --- Split Views ---
+        # Create main horizontal splitter (schema browser | query+results)
+        self.h_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        # Create schema browser
+        self.schema_browser = SchemaBrowser()
+        self.h_splitter.addWidget(self.schema_browser)
+
+        # Create vertical splitter for query editor and results
+        self.v_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+
+        # Create query editor
+        self.query_editor = QueryEditor()
+        self.v_splitter.addWidget(self.query_editor)
+
+        # Create results view
+        self.results_view = ResultsView()
+        self.v_splitter.addWidget(self.results_view)
+
+        # Set initial sizes for splitters from config
+        h_splitter_sizes = self.config.get("splitters").get("h_splitter")
+        v_splitter_sizes = self.config.get("splitters").get("v_splitter")
+
+        self.h_splitter.setSizes(h_splitter_sizes)
+        self.v_splitter.setSizes(v_splitter_sizes)
+
+        # Add vertical splitter to horizontal splitter
+        self.h_splitter.addWidget(self.v_splitter)
+
+        # Add splitter to main layout
+        main_layout.addWidget(self.h_splitter)
+
+        # --- Menu Bar ---
+        self.setup_menu()
+
+        # --- Status Bar ---
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("Ready")
+
+        # --- Database Connection State ---
+        self.db_connection = None  # Store the active connection object
+
+        # --- Connect Signals ---
+        self.connect_signals()
+
+        # --- Connect Splitter Moved Signals to Save Config ---
+        self.h_splitter.splitterMoved.connect(self.save_splitter_sizes)
+        self.v_splitter.splitterMoved.connect(self.save_splitter_sizes)
+
+    def setup_menu(self):
+        """Creates the main menu bar."""
+        menu_bar = self.menuBar()
+
+        # File Menu
+        file_menu = menu_bar.addMenu("&File")
+
+        connect_action = QtGui.QAction("&Connect to Database...", self)
+        connect_action.setStatusTip("Open dialog to connect to a PostgreSQL database")
+        connect_action.triggered.connect(self.open_connection_dialog)
+        file_menu.addAction(connect_action)
+
+        # Recent connections submenu
+        self.recent_menu = QtWidgets.QMenu("Recent Connections", self)
+        self.update_recent_connections_menu()
+        file_menu.addMenu(self.recent_menu)
+
+        disconnect_action = QtGui.QAction("&Disconnect", self)
+        disconnect_action.setStatusTip("Disconnect from the current database")
+        disconnect_action.triggered.connect(self.disconnect_database)
+        disconnect_action.setEnabled(False)  # Disabled initially
+        file_menu.addAction(disconnect_action)
+        self.disconnect_action = disconnect_action  # Store reference to enable/disable
+
+        file_menu.addSeparator()
+
+        exit_action = QtGui.QAction("&Exit", self)
+        exit_action.setStatusTip("Exit the application")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # Query Menu
+        query_menu = menu_bar.addMenu("&Query")
+
+        execute_action = QtGui.QAction("&Execute", self)
+        execute_action.setShortcut("F5")
+        execute_action.setStatusTip("Execute the current query")
+        execute_action.triggered.connect(self.execute_query)
+        query_menu.addAction(execute_action)
+
+        clear_action = QtGui.QAction("&Clear Editor", self)
+        clear_action.setStatusTip("Clear the query editor")
+        clear_action.triggered.connect(self.clear_query)
+        query_menu.addAction(clear_action)
+
+        # Settings Menu
+        settings_menu = menu_bar.addMenu("&Settings")
+
+        preferences_action = QtGui.QAction("&Preferences", self)
+        preferences_action.setStatusTip("Configure application settings")
+        preferences_action.triggered.connect(self.show_preferences_dialog)
+        settings_menu.addAction(preferences_action)
+
+        # Help Menu
+        help_menu = menu_bar.addMenu("&Help")
+
+        about_action = QtGui.QAction("&About", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def connect_signals(self):
+        """Connect signals between components."""
+        # Connect schema browser table selection to query editor
+        self.schema_browser.tableSelected.connect(self.on_table_selected)
+
+        # Connect schema browser query generation to query editor
+        self.schema_browser.queryGenerated.connect(self.on_query_generated)
+
+        # Connect query editor execution to results view
+        self.query_editor.queryExecuted.connect(self.results_view.display_results)
+
+    def save_splitter_sizes(self):
+        """Save splitter sizes to config when they change."""
+        splitters = self.config.get("splitters")
+        splitters["h_splitter"] = self.h_splitter.sizes()
+        splitters["v_splitter"] = self.v_splitter.sizes()
+        self.config.set("splitters", splitters)
+
+    def save_window_state(self):
+        """Save window size, position, and state to config."""
+        window = self.config.get("window")
+
+        # Only save size and position if not maximized
+        if not self.isMaximized():
+            window["size"] = [self.width(), self.height()]
+            window["position"] = [self.x(), self.y()]
+
+        window["maximized"] = self.isMaximized()
+        self.config.set("window", window)
+
+    def update_recent_connections_menu(self):
+        """Update the recent connections menu with saved connections."""
+        self.recent_menu.clear()
+
+        if not self.recent_connections:
+            no_recent_action = QtGui.QAction("No Recent Connections", self)
+            no_recent_action.setEnabled(False)
+            self.recent_menu.addAction(no_recent_action)
+            return
+
+        for conn in self.recent_connections:
+            # Create a menu item with the connection details
+            conn_name = f"{conn.get('dbname', '')}@{conn.get('host', '')}:{conn.get('port', '')}"
+            action = QtGui.QAction(conn_name, self)
+            action.setData(conn)  # Store the connection details
+            action.triggered.connect(self.connect_to_recent)
+            self.recent_menu.addAction(action)
+
+        # Add a separator and clear action
+        self.recent_menu.addSeparator()
+        clear_action = QtGui.QAction("Clear Recent Connections", self)
+        clear_action.triggered.connect(self.clear_recent_connections)
+        self.recent_menu.addAction(clear_action)
+
+    def add_to_recent_connections(self, conn_details):
+        """Add connection details to recent connections list."""
+        # Use the Config class to add the connection
+        self.config.add_recent_connection(conn_details)
+        # Update our local copy
+        self.recent_connections = self.config.get_recent_connections()
+        # Update the menu
+        self.update_recent_connections_menu()
+
+    def clear_recent_connections(self):
+        """Clear the recent connections list."""
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Clear Recent Connections",
+            "Are you sure you want to clear the recent connections list?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+
+        if reply == QtWidgets.QMessageBox.Yes:
+            # Use the Config class to clear connections
+            self.config.set("recent_connections", [])
+            # Update our local copy
+            self.recent_connections = []
+            # Update the menu
+            self.update_recent_connections_menu()
+
+    def connect_to_recent(self):
+        """Connect to a database from the recent connections menu."""
+        action = self.sender()
+        if not action:
+            return
+
+        # Get connection details
+        conn_details = action.data()
+        if not conn_details:
+            return
+
+        # Need to ask for password since we don't store it
+        password, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Password Required",
+            f"Enter password for {conn_details.get('user', '')}@{conn_details.get('dbname', '')}:",
+            QtWidgets.QLineEdit.Password,
+        )
+
+        if not ok:
+            return
+
+        # Add password to connection details
+        conn_details["password"] = password
+
+        # Connect
+        self.status_bar.showMessage("Connecting...")
+        try:
+            self.db_connection = connect_to_db(**conn_details)
+            if self.db_connection:
+                db_name = conn_details.get("dbname", "Unknown DB")
+                host = conn_details.get("host", "Unknown Host")
+                user = conn_details.get("user", "Unknown User")
+                self.status_bar.showMessage(
+                    f"Connected to '{db_name}' on '{host}' as '{user}'"
+                )
+                self.disconnect_action.setEnabled(True)
+
+                # Set up UI for connected state
+                self.setup_connected_state(db_name, host)
+
+                # Add to recent connections
+                self.add_to_recent_connections(conn_details)
+            else:
+                self.status_bar.showMessage("Connection failed.")
+        except ConnectionError as e:
+            self.status_bar.showMessage(f"Connection Error: {e}")
+            QtWidgets.QMessageBox.critical(
+                self, "Connection Error", f"Failed to connect:\n{e}"
+            )
+        except Exception as e:
+            self.status_bar.showMessage(f"An unexpected error occurred: {e}")
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"An unexpected error occurred:\n{e}"
+            )
+
+    def open_connection_dialog(self):
+        """Opens the database connection dialog."""
+        if self.db_connection:
+            # Prevent opening if already connected - could ask to disconnect first
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Already Connected",
+                "Please disconnect before connecting to a new database.",
+            )
+            return
+
+        dialog = ConnectionDialog(self)
+        if dialog.exec():
+            conn_details = dialog.get_connection_details()
+            self.status_bar.showMessage("Connecting...")
+            try:
+                self.db_connection = connect_to_db(**conn_details)
+                if self.db_connection:
+                    db_name = conn_details.get("dbname", "Unknown DB")
+                    host = conn_details.get("host", "Unknown Host")
+                    user = conn_details.get("user", "Unknown User")
+                    self.status_bar.showMessage(
+                        f"Connected to '{db_name}' on '{host}' as '{user}'"
+                    )
+                    self.disconnect_action.setEnabled(True)
+
+                    # Set up UI for connected state
+                    self.setup_connected_state(db_name, host)
+
+                    # Add to recent connections
+                    self.add_to_recent_connections(conn_details)
+                else:
+                    self.status_bar.showMessage("Connection failed.")
+            except ConnectionError as e:
+                self.status_bar.showMessage(f"Connection Error: {e}")
+                QtWidgets.QMessageBox.critical(
+                    self, "Connection Error", f"Failed to connect:\n{e}"
+                )
+            except Exception as e:
+                self.status_bar.showMessage(f"An unexpected error occurred: {e}")
+                QtWidgets.QMessageBox.critical(
+                    self, "Error", f"An unexpected error occurred:\n{e}"
+                )
+
+    def setup_connected_state(self, db_name, host):
+        """Set up the UI for a connected database state."""
+        # Update window title to show connection info
+        self.setWindowTitle(f"PG Data Explorer - {db_name}@{host}")
+
+        # Update components with the connection
+        self.schema_browser.populate_schema(self.db_connection)
+        self.query_editor.set_connection(self.db_connection)
+
+        # Clear any previous results
+        self.results_view.clear_results()
+
+    def disconnect_database(self):
+        """Closes the current database connection."""
+        if self.db_connection:
+            try:
+                self.db_connection.close()
+                self.db_connection = None
+                self.status_bar.showMessage("Disconnected.")
+                self.disconnect_action.setEnabled(False)
+
+                # Reset UI state
+                self.reset_ui_state()
+            except Exception as e:
+                self.status_bar.showMessage(f"Error during disconnection: {e}")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Disconnection Error",
+                    f"An error occurred while disconnecting:\n{e}",
+                )
+        else:
+            self.status_bar.showMessage("Not currently connected.")
+
+    def reset_ui_state(self):
+        """Reset the UI to the disconnected state."""
+        # Reset window title
+        self.setWindowTitle("PG Data Explorer")
+
+        # Clear schema browser
+        self.schema_browser.clear()
+
+        # Reset query editor
+        self.query_editor.set_connection(None)
+
+        # Clear results
+        self.results_view.clear_results()
+
+    def on_table_selected(self, schema_name, table_name):
+        """Handle a table being selected in the schema browser."""
+        # Get default query limit from config
+        limit = self.config.get("query_limit", 100)
+
+        # Generate a SELECT query for the table
+        query = f"SELECT * FROM {schema_name}.{table_name} LIMIT {limit};"
+
+        # Insert the query into the editor
+        self.query_editor.editor.setPlainText(query)
+
+        # Optionally, execute the query automatically
+        # self.execute_query()
+
+    def on_query_generated(self, query):
+        """Handle a query being generated from the schema browser."""
+        # Insert the query into the editor
+        self.query_editor.editor.setPlainText(query)
+
+        # Focus the query editor
+        self.query_editor.editor.setFocus()
+
+    def execute_query(self):
+        """Execute the current query in the editor."""
+        query = self.query_editor.editor.toPlainText().strip()
+        if query:
+            # Add to query history in config
+            self.config.add_query_history(query)
+
+        # Execute the query
+        self.query_editor.execute_query()
+
+    def clear_query(self):
+        """Clear the query editor."""
+        self.query_editor.clear_query()
+
+    def show_preferences_dialog(self):
+        """Show the preferences dialog."""
+        # This is a placeholder for implementing a preferences dialog
+        # Will implement this later
+        QtWidgets.QMessageBox.information(
+            self,
+            "Preferences",
+            "Preferences dialog will be implemented in a future version.",
+        )
+
+    def show_about_dialog(self):
+        """Show the about dialog."""
+        QtWidgets.QMessageBox.about(
+            self,
+            "About PG Data Explorer",
+            """<h3>PG Data Explorer</h3>
+            <p>A cross-platform PostgreSQL database explorer with Odoo compatibility.</p>
+            <p>Created by You as a portfolio project.</p>
+            <p>Version 0.1.0</p>""",
+        )
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        """Handle window close event to save state and disconnect."""
+        # Save window state
+        self.save_window_state()
+
+        # Save splitter sizes
+        self.save_splitter_sizes()
+
+        # Disconnect from database
+        self.disconnect_database()
+
+        # Accept the close event
+        event.accept()
 
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/__init__.py ==========
@@ -10,10 +456,12 @@
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/dialogs/connection_dialog.py ==========
 from PySide6 import QtWidgets, QtCore
 
+
 class ConnectionDialog(QtWidgets.QDialog):
     """
     A dialog window for entering PostgreSQL connection details.
     """
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -23,8 +471,8 @@ class ConnectionDialog(QtWidgets.QDialog):
         # --- Widgets ---
         self.host_input = QtWidgets.QLineEdit("localhost")
         self.port_input = QtWidgets.QLineEdit("5432")
-        self.db_input = QtWidgets.QLineEdit("odoo_database") # Example default
-        self.user_input = QtWidgets.QLineEdit("odoo_user")   # Example default
+        self.db_input = QtWidgets.QLineEdit("odoo_database")  # Example default
+        self.user_input = QtWidgets.QLineEdit("odoo_user")  # Example default
         self.password_input = QtWidgets.QLineEdit()
         self.password_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
 
@@ -39,15 +487,16 @@ class ConnectionDialog(QtWidgets.QDialog):
         # --- Buttons ---
         # Standard buttons for dialogs (OK, Cancel)
         button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok |
-            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
-        button_box.accepted.connect(self.accept) # Connect Ok signal to accept slot
-        button_box.rejected.connect(self.reject) # Connect Cancel signal to reject slot
+        button_box.accepted.connect(self.accept)  # Connect Ok signal to accept slot
+        button_box.rejected.connect(self.reject)  # Connect Cancel signal to reject slot
 
         # Rename OK button to "Connect" for clarity
-        button_box.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Connect")
-
+        button_box.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(
+            "Connect"
+        )
 
         # --- Main Layout ---
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -67,17 +516,22 @@ class ConnectionDialog(QtWidgets.QDialog):
             "port": self.port_input.text().strip(),
             "dbname": self.db_input.text().strip(),
             "user": self.user_input.text().strip(),
-            "password": self.password_input.text() # Don't strip password
+            "password": self.password_input.text(),  # Don't strip password
         }
 
     # Override accept to add basic validation (optional but good)
     def accept(self):
         """Validates input before accepting the dialog."""
         details = self.get_connection_details()
-        if not all([details["host"], details["port"], details["dbname"], details["user"]]):
-             QtWidgets.QMessageBox.warning(self, "Missing Information",
-                                           "Please fill in Host, Port, Database, and User fields.")
-             return # Stay on the dialog
+        if not all(
+            [details["host"], details["port"], details["dbname"], details["user"]]
+        ):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing Information",
+                "Please fill in Host, Port, Database, and User fields.",
+            )
+            return  # Stay on the dialog
 
         # Basic port validation
         try:
@@ -85,18 +539,945 @@ class ConnectionDialog(QtWidgets.QDialog):
             if not (0 < port_num < 65536):
                 raise ValueError("Port number out of range")
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Invalid Port",
-                                          "Please enter a valid port number (1-65535).")
-            self.port_input.setFocus() # Focus the port input
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Port", "Please enter a valid port number (1-65535)."
+            )
+            self.port_input.setFocus()  # Focus the port input
             self.port_input.selectAll()
-            return # Stay on the dialog
+            return  # Stay on the dialog
 
         # If validation passes, call the original accept method
         super().accept()
 
 
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/widgets/results_view.py ==========
+from PySide6 import QtWidgets, QtCore, QtGui
+import csv
+import io
+
+
+class ResultsView(QtWidgets.QWidget):
+    """
+    Widget for displaying SQL query results.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create toolbar
+        toolbar = QtWidgets.QToolBar()
+        layout.addWidget(toolbar)
+
+        # Export action
+        export_action = QtGui.QAction("Export to CSV", self)
+        export_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
+        export_action.triggered.connect(self.export_to_csv)
+        toolbar.addAction(export_action)
+
+        # Copy action
+        copy_action = QtGui.QAction("Copy Selection", self)
+        copy_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+        )
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.triggered.connect(self.copy_selection)
+        toolbar.addAction(copy_action)
+
+        # Clear action
+        clear_action = QtGui.QAction("Clear Results", self)
+        clear_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)
+        )
+        clear_action.triggered.connect(self.clear_results)
+        toolbar.addAction(clear_action)
+
+        # Add table view
+        self.table_view = QtWidgets.QTableView()
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setSortingEnabled(True)
+        self.table_view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table_view.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.table_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self.show_context_menu)
+
+        # Create model
+        self.model = QtGui.QStandardItemModel()
+        self.table_view.setModel(self.model)
+
+        layout.addWidget(self.table_view)
+
+        # Add status bar
+        self.status_bar = QtWidgets.QStatusBar()
+        self.status_bar.showMessage("No results")
+        layout.addWidget(self.status_bar)
+
+    def display_results(self, columns, data):
+        """
+        Display the query results.
+
+        Args:
+            columns (list): List of column names
+            data (list): List of result rows (each row is a tuple of values)
+        """
+        # Clear previous results
+        self.model.clear()
+
+        if not columns:
+            self.status_bar.showMessage("No results")
+            return
+
+        # Set column headers
+        self.model.setHorizontalHeaderLabels(columns)
+
+        # Add data rows
+        for row_index, row_data in enumerate(data):
+            row_items = []
+            for col_index, cell_value in enumerate(row_data):
+                item = QtGui.QStandardItem()
+
+                # Handle None values
+                if cell_value is None:
+                    item.setText("NULL")
+                    item.setData(None, QtCore.Qt.UserRole)
+                    # Gray out NULL values
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(150, 150, 150)))
+                else:
+                    # Convert all values to strings for display
+                    text = str(cell_value)
+                    item.setText(text)
+                    item.setData(cell_value, QtCore.Qt.UserRole)
+
+                row_items.append(item)
+
+            self.model.appendRow(row_items)
+
+        # Resize columns to contents
+        self.table_view.resizeColumnsToContents()
+
+        # Update status bar
+        row_count = len(data)
+        column_count = len(columns)
+        self.status_bar.showMessage(f"{row_count} rows, {column_count} columns")
+
+    def show_context_menu(self, position):
+        """Show context menu for the results table."""
+        menu = QtWidgets.QMenu()
+
+        # Add actions
+        copy_action = menu.addAction("Copy Selection")
+        copy_action.triggered.connect(self.copy_selection)
+
+        export_action = menu.addAction("Export to CSV")
+        export_action.triggered.connect(self.export_to_csv)
+
+        # Show menu
+        menu.exec(self.table_view.viewport().mapToGlobal(position))
+
+    def copy_selection(self):
+        """Copy selected cells to clipboard."""
+        selection = self.table_view.selectionModel()
+        if not selection.hasSelection():
+            return
+
+        selected_indexes = selection.selectedIndexes()
+        if not selected_indexes:
+            return
+
+        # Sort indexes by row, then column
+        selected_indexes.sort(key=lambda idx: (idx.row(), idx.column()))
+
+        # Find the minimum and maximum row and column
+        min_row = min(index.row() for index in selected_indexes)
+        max_row = max(index.row() for index in selected_indexes)
+        min_col = min(index.column() for index in selected_indexes)
+        max_col = max(index.column() for index in selected_indexes)
+
+        # Create a string to hold the copied data
+        text = ""
+
+        # Iterate through rows and columns
+        for row in range(min_row, max_row + 1):
+            row_text = []
+            for col in range(min_col, max_col + 1):
+                index = self.model.index(row, col)
+                if index in selected_indexes:
+                    # Use the text directly from the model
+                    data = self.model.data(index)
+                    row_text.append(str(data) if data is not None else "")
+                else:
+                    # If this cell is not selected, add an empty string
+                    row_text.append("")
+
+            # Add row to text
+            text += "\t".join(row_text) + "\n"
+
+        # Remove the trailing newline
+        if text.endswith("\n"):
+            text = text[:-1]
+
+        # Copy to clipboard
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(text)
+
+        # Update status bar
+        self.status_bar.showMessage("Selection copied to clipboard")
+
+    def export_to_csv(self):
+        """Export the results to a CSV file."""
+        if self.model.rowCount() == 0:
+            self.status_bar.showMessage("No data to export")
+            return
+
+        # Open file dialog
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export to CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", newline="") as file:
+                writer = csv.writer(file)
+
+                # Write header
+                header = []
+                for col in range(self.model.columnCount()):
+                    header.append(self.model.headerData(col, QtCore.Qt.Horizontal))
+                writer.writerow(header)
+
+                # Write data
+                for row in range(self.model.rowCount()):
+                    row_data = []
+                    for col in range(self.model.columnCount()):
+                        item = self.model.index(row, col)
+                        value = self.model.data(item, QtCore.Qt.DisplayRole)
+                        if value == "NULL":  # Handle NULL display values
+                            value = ""
+                        row_data.append(value)
+                    writer.writerow(row_data)
+
+            self.status_bar.showMessage(f"Data exported to {file_path}")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Export Error", f"Failed to export data: {str(e)}"
+            )
+
+    def clear_results(self):
+        """Clear the results table."""
+        self.model.clear()
+        self.status_bar.showMessage("No results")
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/widgets/query_editor.py ==========
+from PySide6 import QtWidgets, QtCore, QtGui
+
+
+class QueryEditor(QtWidgets.QWidget):
+    """
+    Widget for editing and executing SQL queries.
+    """
+
+    # Signal emitted when a query is executed
+    queryExecuted = QtCore.Signal(list, list)  # columns, data
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Store database connection
+        self.connection = None
+
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create toolbar
+        toolbar = QtWidgets.QToolBar()
+        layout.addWidget(toolbar)
+
+        # Execute action
+        self.execute_action = QtGui.QAction("Execute", self)
+        self.execute_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_MediaPlay)
+        )
+        self.execute_action.setShortcut("F5")
+        self.execute_action.setToolTip("Execute query (F5)")
+        self.execute_action.triggered.connect(self.execute_query)
+        toolbar.addAction(self.execute_action)
+
+        # Clear action
+        clear_action = QtGui.QAction("Clear", self)
+        clear_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)
+        )
+        clear_action.triggered.connect(self.clear_query)
+        toolbar.addAction(clear_action)
+
+        toolbar.addSeparator()
+
+        # History actions (placeholder)
+        back_action = QtGui.QAction("Previous", self)
+        back_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
+        back_action.setEnabled(False)  # Disabled until history is implemented
+        toolbar.addAction(back_action)
+
+        forward_action = QtGui.QAction("Next", self)
+        forward_action.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight)
+        )
+        forward_action.setEnabled(False)  # Disabled until history is implemented
+        toolbar.addAction(forward_action)
+
+        # Add query editor
+        self.editor = QtWidgets.QPlainTextEdit()
+        self.editor.setPlaceholderText("Enter your SQL query here...")
+
+        # Use a monospaced font
+        font = QtGui.QFont("Courier New", 10)
+        self.editor.setFont(font)
+
+        # Add line numbers (optional enhancement)
+        self.line_numbers = LineNumberArea(self.editor)
+        self.editor.blockCountChanged.connect(self.update_line_number_area_width)
+        self.editor.updateRequest.connect(self.update_line_number_area)
+        self.update_line_number_area_width(0)
+
+        layout.addWidget(self.editor)
+
+        # Enable syntax highlighting (for a future enhancement)
+        # self.highlighter = SQLHighlighter(self.editor.document())
+
+        # Add status bar
+        self.status_bar = QtWidgets.QStatusBar()
+        self.status_bar.showMessage("Ready")
+        layout.addWidget(self.status_bar)
+
+        # Query history
+        self.query_history = []
+        self.history_position = -1
+
+    def set_connection(self, connection):
+        """Set the database connection."""
+        self.connection = connection
+        # Enable or disable execute button based on connection status
+        self.execute_action.setEnabled(connection is not None)
+
+    def execute_query(self):
+        """Execute the current SQL query."""
+        if not self.connection:
+            self.status_bar.showMessage("Not connected to a database.")
+            return
+
+        # Get the query text
+        query = self.editor.toPlainText().strip()
+        if not query:
+            self.status_bar.showMessage("No query to execute.")
+            return
+
+        # Add to history
+        if not self.query_history or self.query_history[-1] != query:
+            self.query_history.append(query)
+            self.history_position = len(self.query_history) - 1
+
+        # Update status
+        self.status_bar.showMessage("Executing query...")
+
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+
+            # Check if the query returns results
+            if cursor.description:
+                # Get column names
+                columns = [desc[0] for desc in cursor.description]
+
+                # Fetch all data
+                # Note: For large results, might want to limit rows or implement pagination
+                data = cursor.fetchall()
+
+                # Update status
+                self.status_bar.showMessage(
+                    f"Query executed successfully. Returned {len(data)} rows."
+                )
+
+                # Emit signal with results
+                self.queryExecuted.emit(columns, data)
+            else:
+                # For queries that don't return data (INSERT, UPDATE, DELETE)
+                affected = cursor.rowcount
+                self.status_bar.showMessage(
+                    f"Query executed successfully. Affected {affected} rows."
+                )
+
+                # Emit signal with empty results to clear the results view
+                self.queryExecuted.emit([], [])
+
+            cursor.close()
+
+        except Exception as e:
+            self.status_bar.showMessage(f"Error: {str(e)}")
+            # Display error in a message box for better visibility
+            QtWidgets.QMessageBox.critical(self, "Query Error", str(e))
+
+    def clear_query(self):
+        """Clear the query editor."""
+        self.editor.clear()
+        self.status_bar.showMessage("Ready")
+
+    def insert_text(self, text):
+        """Insert text at the current cursor position."""
+        self.editor.insertPlainText(text)
+
+    def update_line_number_area_width(self, count):
+        """Update the width of the line number area."""
+        width = self.line_numbers.calculate_width(self.editor.blockCount())
+        self.editor.setViewportMargins(width, 0, 0, 0)
+
+    def update_line_number_area(self, rect, dy):
+        """Update the line number area."""
+        if dy:
+            self.line_numbers.scroll(0, dy)
+        else:
+            self.line_numbers.update(
+                0, rect.y(), self.line_numbers.width(), rect.height()
+            )
+
+        if rect.contains(self.editor.viewport().rect()):
+            self.update_line_number_area_width(0)
+
+
+class LineNumberArea(QtWidgets.QWidget):
+    """Widget for displaying line numbers in the query editor."""
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+        self.editor.installEventFilter(self)
+
+    def calculate_width(self, count):
+        """Calculate the width needed to display line numbers."""
+        digits = len(str(max(1, count)))
+        return 10 + self.editor.fontMetrics().horizontalAdvance("9") * digits
+
+    def eventFilter(self, obj, event):
+        """Handle resize events to update the line number area."""
+        if obj is self.editor and event.type() == QtCore.QEvent.Resize:
+            rect = self.editor.contentsRect()
+            self.setGeometry(
+                QtCore.QRect(
+                    rect.left(),
+                    rect.top(),
+                    self.calculate_width(self.editor.blockCount()),
+                    rect.height(),
+                )
+            )
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event):
+        """Paint the line numbers."""
+        painter = QtGui.QPainter(self)
+        painter.fillRect(event.rect(), QtGui.QColor(240, 240, 240))
+
+        block = self.editor.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(
+            self.editor.blockBoundingGeometry(block)
+            .translated(self.editor.contentOffset())
+            .top()
+        )
+        bottom = top + int(self.editor.blockBoundingRect(block).height())
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                painter.setPen(QtGui.QColor(100, 100, 100))
+                painter.drawText(
+                    0,
+                    top,
+                    self.width() - 5,
+                    self.editor.fontMetrics().height(),
+                    QtCore.Qt.AlignRight,
+                    number,
+                )
+
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.editor.blockBoundingRect(block).height())
+            block_number += 1
+
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/widgets/__init__.py ==========
+
+
+========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/ui/widgets/schema_browser.py ==========
+from PySide6 import QtWidgets, QtCore, QtGui
+
+
+class SchemaBrowser(QtWidgets.QTreeWidget):
+    """
+    Tree widget for browsing database schemas, tables, and columns.
+    """
+
+    # Signal emitted when a table is double-clicked
+    tableSelected = QtCore.Signal(str, str)  # schema_name, table_name
+    queryGenerated = QtCore.Signal(str)  # Signal to emit generated queries
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Set properties
+        self.setHeaderLabels(["Database Objects"])
+        self.setAlternatingRowColors(True)
+        self.setAnimated(True)
+
+        # Connect signals
+        self.itemExpanded.connect(self.on_item_expanded)
+        self.itemDoubleClicked.connect(self.on_item_double_clicked)
+
+        # Context menu
+        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def populate_schema(self, connection):
+        """
+        Populate the tree with schema information from the database.
+
+        Args:
+            connection: psycopg2 connection object
+        """
+        self.clear()
+        self.connection = connection
+
+        try:
+            cursor = connection.cursor()
+
+            # Get schemas
+            cursor.execute("""
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT LIKE 'pg_%' 
+                AND schema_name != 'information_schema'
+                ORDER BY schema_name
+            """)
+
+            schemas = cursor.fetchall()
+
+            # For each schema
+            for schema in schemas:
+                schema_name = schema[0]
+                schema_item = QtWidgets.QTreeWidgetItem(self, [schema_name])
+                schema_item.setData(
+                    0, QtCore.Qt.UserRole, {"type": "schema", "name": schema_name}
+                )
+
+                # Add a placeholder for tables
+                placeholder = QtWidgets.QTreeWidgetItem(
+                    schema_item, ["Loading tables..."]
+                )
+                schema_item.addChild(placeholder)
+
+            cursor.close()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error Loading Schema",
+                f"Failed to load database schema:\n{str(e)}",
+            )
+
+    def on_item_expanded(self, item):
+        """Load child items when a parent item is expanded."""
+        item_data = item.data(0, QtCore.Qt.UserRole)
+        if not item_data:
+            return
+
+        item_type = item_data.get("type")
+
+        # If a schema is expanded, load its tables
+        if (
+            item_type == "schema"
+            and item.childCount() == 1
+            and item.child(0).text(0) == "Loading tables..."
+        ):
+            schema_name = item_data.get("name")
+            self.load_tables(item, schema_name)
+
+        # If a table is expanded, load its columns
+        elif (
+            item_type == "table"
+            and item.childCount() == 1
+            and item.child(0).text(0) == "Loading columns..."
+        ):
+            schema_name = item_data.get("schema")
+            table_name = item_data.get("name")
+            self.load_columns(item, schema_name, table_name)
+
+    def load_tables(self, schema_item, schema_name):
+        """Load tables for a schema."""
+        try:
+            # Remove placeholder
+            schema_item.removeChild(schema_item.child(0))
+
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = %s 
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """,
+                (schema_name,),
+            )
+
+            tables = cursor.fetchall()
+
+            if not tables:
+                no_tables = QtWidgets.QTreeWidgetItem(schema_item, ["No tables"])
+                schema_item.addChild(no_tables)
+                return
+
+            # Add tables
+            for table in tables:
+                table_name = table[0]
+                table_item = QtWidgets.QTreeWidgetItem(schema_item, [table_name])
+                table_item.setData(
+                    0,
+                    QtCore.Qt.UserRole,
+                    {"type": "table", "name": table_name, "schema": schema_name},
+                )
+
+                # Add placeholder for columns
+                placeholder = QtWidgets.QTreeWidgetItem(
+                    table_item, ["Loading columns..."]
+                )
+                table_item.addChild(placeholder)
+
+            cursor.close()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error Loading Tables",
+                f"Failed to load tables for schema '{schema_name}':\n{str(e)}",
+            )
+
+    def load_columns(self, table_item, schema_name, table_name):
+        """Load columns for a table."""
+        try:
+            # Remove placeholder
+            table_item.removeChild(table_item.child(0))
+
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """,
+                (schema_name, table_name),
+            )
+
+            columns = cursor.fetchall()
+
+            if not columns:
+                no_columns = QtWidgets.QTreeWidgetItem(table_item, ["No columns"])
+                table_item.addChild(no_columns)
+                return
+
+            # Add columns
+            for column in columns:
+                column_name = column[0]
+                data_type = column[1]
+                is_nullable = "YES" if column[2] == "YES" else "NO"
+
+                # Include data type and nullability in the display
+                display_text = f"{column_name} ({data_type}, Nullable: {is_nullable})"
+
+                column_item = QtWidgets.QTreeWidgetItem(table_item, [display_text])
+                column_item.setData(
+                    0,
+                    QtCore.Qt.UserRole,
+                    {
+                        "type": "column",
+                        "name": column_name,
+                        "data_type": data_type,
+                        "is_nullable": is_nullable,
+                        "table": table_name,
+                        "schema": schema_name,
+                    },
+                )
+
+            cursor.close()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error Loading Columns",
+                f"Failed to load columns for table '{schema_name}.{table_name}':\n{str(e)}",
+            )
+
+    def on_item_double_clicked(self, item, column):
+        """Handle double-click on an item."""
+        item_data = item.data(0, QtCore.Qt.UserRole)
+        if not item_data:
+            return
+
+        item_type = item_data.get("type")
+
+        if item_type == "table":
+            schema_name = item_data.get("schema")
+            table_name = item_data.get("name")
+            # Emit signal with schema and table name
+            self.tableSelected.emit(schema_name, table_name)
+
+    def show_context_menu(self, position):
+        """Show context menu for tree items."""
+        item = self.itemAt(position)
+        if not item:
+            return
+
+        item_data = item.data(0, QtCore.Qt.UserRole)
+        if not item_data:
+            return
+
+        item_type = item_data.get("type")
+
+        menu = QtWidgets.QMenu()
+
+        if item_type == "schema":
+            schema_name = item_data.get("name")
+            refresh_action = menu.addAction("Refresh Schema")
+            refresh_action.triggered.connect(
+                lambda: self.refresh_schema_item(item, schema_name)
+            )
+
+        elif item_type == "table":
+            schema_name = item_data.get("schema")
+            table_name = item_data.get("name")
+
+            view_action = menu.addAction("Browse Data")
+            view_action.triggered.connect(
+                lambda: self.tableSelected.emit(schema_name, table_name)
+            )
+
+            refresh_action = menu.addAction("Refresh Table")
+            refresh_action.triggered.connect(
+                lambda: self.refresh_table_item(item, schema_name, table_name)
+            )
+
+            # Structure submenu
+            structure_menu = menu.addMenu("Structure")
+
+            # Add actions to structure menu
+            columns_action = structure_menu.addAction("Show Columns")
+            columns_action.triggered.connect(
+                lambda: self.show_table_columns(schema_name, table_name)
+            )
+
+            indexes_action = structure_menu.addAction("Show Indexes")
+            indexes_action.triggered.connect(
+                lambda: self.show_table_indexes(schema_name, table_name)
+            )
+
+            # Sample query submenu
+            query_menu = menu.addMenu("Sample Queries")
+
+            # Add sample query actions
+            select_action = query_menu.addAction("SELECT *")
+            select_action.triggered.connect(
+                lambda: self.generate_query(
+                    f"SELECT * FROM {schema_name}.{table_name} LIMIT 100;"
+                )
+            )
+
+            count_action = query_menu.addAction("COUNT(*)")
+            count_action.triggered.connect(
+                lambda: self.generate_query(
+                    f"SELECT COUNT(*) FROM {schema_name}.{table_name};"
+                )
+            )
+
+        elif item_type == "column":
+            schema_name = item_data.get("schema")
+            table_name = item_data.get("table")
+            column_name = item_data.get("name")
+
+            # Query submenu for column
+            query_menu = menu.addMenu("Sample Queries")
+
+            # Add sample query actions for column
+            select_action = query_menu.addAction(f"SELECT {column_name}")
+            select_action.triggered.connect(
+                lambda: self.generate_query(
+                    f"SELECT {column_name} FROM {schema_name}.{table_name} LIMIT 100;"
+                )
+            )
+
+            distinct_action = query_menu.addAction(f"SELECT DISTINCT {column_name}")
+            distinct_action.triggered.connect(
+                lambda: self.generate_query(
+                    f"SELECT DISTINCT {column_name} FROM {schema_name}.{table_name} LIMIT 100;"
+                )
+            )
+
+            count_action = query_menu.addAction(f"COUNT DISTINCT {column_name}")
+            count_action.triggered.connect(
+                lambda: self.generate_query(
+                    f"SELECT COUNT(DISTINCT {column_name}) FROM {schema_name}.{table_name};"
+                )
+            )
+
+        # Only show menu if it has actions
+        if not menu.isEmpty():
+            menu.exec(self.viewport().mapToGlobal(position))
+
+    def refresh_schema_item(self, item, schema_name):
+        """Refresh a schema item."""
+        # Remove all children
+        item.takeChildren()
+
+        # Add placeholder
+        placeholder = QtWidgets.QTreeWidgetItem(item, ["Loading tables..."])
+        item.addChild(placeholder)
+
+        # Load tables
+        self.load_tables(item, schema_name)
+
+    def refresh_table_item(self, item, schema_name, table_name):
+        """Refresh a table item."""
+        # Remove all children
+        item.takeChildren()
+
+        # Add placeholder
+        placeholder = QtWidgets.QTreeWidgetItem(item, ["Loading columns..."])
+        item.addChild(placeholder)
+
+        # Load columns
+        self.load_columns(item, schema_name, table_name)
+
+    def show_table_columns(self, schema_name, table_name):
+        """Show table columns in a popup."""
+        # This would be implemented to show detailed column info
+        # For now, we'll just expand the table node
+        for i in range(self.topLevelItemCount()):
+            schema_item = self.topLevelItem(i)
+            schema_data = schema_item.data(0, QtCore.Qt.UserRole)
+
+            if (
+                schema_data
+                and schema_data.get("type") == "schema"
+                and schema_data.get("name") == schema_name
+            ):
+                schema_item.setExpanded(True)
+
+                for j in range(schema_item.childCount()):
+                    table_item = schema_item.child(j)
+                    table_data = table_item.data(0, QtCore.Qt.UserRole)
+
+                    if (
+                        table_data
+                        and table_data.get("type") == "table"
+                        and table_data.get("name") == table_name
+                    ):
+                        table_item.setExpanded(True)
+                        break
+
+                break
+
+    def show_table_indexes(self, schema_name, table_name):
+        """Show table indexes in a popup."""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    i.relname AS index_name,
+                    a.attname AS column_name,
+                    am.amname AS index_type
+                FROM
+                    pg_class t,
+                    pg_class i,
+                    pg_index ix,
+                    pg_attribute a,
+                    pg_am am,
+                    pg_namespace n
+                WHERE
+                    t.oid = ix.indrelid
+                    AND i.oid = ix.indexrelid
+                    AND a.attrelid = t.oid
+                    AND a.attnum = ANY(ix.indkey)
+                    AND t.relkind = 'r'
+                    AND i.relam = am.oid
+                    AND t.relnamespace = n.oid
+                    AND n.nspname = %s
+                    AND t.relname = %s
+                ORDER BY
+                    i.relname, array_position(ix.indkey, a.attnum)
+            """,
+                (schema_name, table_name),
+            )
+
+            indexes = cursor.fetchall()
+            cursor.close()
+
+            if not indexes:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Indexes",
+                    f"No indexes found for table '{schema_name}.{table_name}'",
+                )
+                return
+
+            # Create a simple dialog to display indexes
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle(f"Indexes for {schema_name}.{table_name}")
+            dialog.resize(400, 300)
+
+            layout = QtWidgets.QVBoxLayout(dialog)
+
+            # Create a table widget to display indexes
+            table = QtWidgets.QTableWidget()
+            table.setColumnCount(3)
+            table.setHorizontalHeaderLabels(["Index Name", "Column", "Type"])
+            table.setRowCount(len(indexes))
+
+            for i, index in enumerate(indexes):
+                table.setItem(i, 0, QtWidgets.QTableWidgetItem(index[0]))
+                table.setItem(i, 1, QtWidgets.QTableWidgetItem(index[1]))
+                table.setItem(i, 2, QtWidgets.QTableWidgetItem(index[2]))
+
+            table.resizeColumnsToContents()
+            layout.addWidget(table)
+
+            # Add a close button
+            button = QtWidgets.QPushButton("Close")
+            button.clicked.connect(dialog.accept)
+            layout.addWidget(button)
+
+            dialog.setLayout(layout)
+            dialog.exec()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error Loading Indexes",
+                f"Failed to load indexes for table '{schema_name}.{table_name}':\n{str(e)}",
+            )
+
+    def generate_query(self, query):
+        """Generate a SQL query and emit a signal with it."""
+        # Emit the signal with the generated query
+        self.queryGenerated.emit(query)
+
 
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/database/__init__.py ==========
@@ -106,10 +1487,13 @@ class ConnectionDialog(QtWidgets.QDialog):
 import psycopg2
 from psycopg2 import OperationalError
 
+
 # Define a custom exception for better error handling context
 class ConnectionError(Exception):
     """Custom exception for database connection errors."""
+
     pass
+
 
 def connect_to_db(host, port, dbname, user, password):
     """
@@ -130,31 +1514,34 @@ def connect_to_db(host, port, dbname, user, password):
     """
     conn = None
     try:
-        print(f"Attempting to connect: dbname='{dbname}' user='{user}' host='{host}' port='{port}'") # Debug print
+        print(
+            f"Attempting to connect: dbname='{dbname}' user='{user}' host='{host}' port='{port}'"
+        )  # Debug print
         conn = psycopg2.connect(
             host=host,
             port=port,
             dbname=dbname,
             user=user,
             password=password,
-            connect_timeout=5 # Add a timeout (in seconds)
+            connect_timeout=5,  # Add a timeout (in seconds)
         )
-        print("Connection successful!") # Debug print
+        print("Connection successful!")  # Debug print
         return conn
     except OperationalError as e:
         # Catch specific psycopg2 connection errors
-        print(f"Connection failed: {e}") # Debug print
+        print(f"Connection failed: {e}")  # Debug print
         # Raise a more specific custom error
         raise ConnectionError(f"Could not connect to database.\nDetails: {e}") from e
     except Exception as e:
         # Catch any other unexpected errors during connection attempt
-        print(f"An unexpected error occurred during connection: {e}") # Debug print
+        print(f"An unexpected error occurred during connection: {e}")  # Debug print
         if conn:
-            conn.close() # Ensure connection is closed if partially opened
+            conn.close()  # Ensure connection is closed if partially opened
         raise ConnectionError(f"An unexpected error occurred.\nDetails: {e}") from e
 
+
 # Example of how to use (for testing purposes, not typically run directly)
-if __name__ == '__main__':
+if __name__ == "__main__":
     # --- IMPORTANT ---
     # Replace with actual test database details
     # DO NOT COMMIT ACTUAL CREDENTIALS
@@ -163,14 +1550,16 @@ if __name__ == '__main__':
         "port": "5432",
         "dbname": "your_test_db",
         "user": "your_test_user",
-        "password": "your_test_password"
+        "password": "your_test_password",
     }
 
     try:
         connection = connect_to_db(**test_details)
         if connection:
             print("\n--- Test Connection Successful ---")
-            print(f"Connected to PostgreSQL server version: {connection.server_version}")
+            print(
+                f"Connected to PostgreSQL server version: {connection.server_version}"
+            )
             # You can perform a simple query here if needed
             # cur = connection.cursor()
             # cur.execute("SELECT version();")
@@ -182,15 +1571,144 @@ if __name__ == '__main__':
         print(f"\n--- Test Connection Failed ---")
         print(err)
     except ImportError:
-        print("Error: psycopg2 library not found. Please install it: pip install psycopg2-binary")
-
+        print(
+            "Error: psycopg2 library not found. Please install it: pip install psycopg2-binary"
+        )
 
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/database/odoo_helper.py ==========
 
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/config.py ==========
+# In src/data_explorer/config.py
 
+import json
+import os
+from pathlib import Path
+
+class Config:
+    """Configuration manager for the application."""
+    
+    def __init__(self):
+        # Determine config file location
+        self.config_dir = Path.home() / ".pgdataexplorer"
+        self.config_file = self.config_dir / "config.json"
+        
+        # Default configuration
+        self.defaults = {
+            "recent_connections": [],
+            "window": {
+                "size": [1000, 700],
+                "position": [100, 100],
+                "maximized": False
+            },
+            "splitters": {
+                "h_splitter": [250, 750],
+                "v_splitter": [300, 400]
+            },
+            "query_history": [],
+            "query_limit": 100  # Default LIMIT value for SELECT queries
+        }
+        
+        # Load configuration
+        self.config = self.load()
+    
+    def load(self):
+        """Load configuration from file."""
+        # Create config directory if it doesn't exist
+        if not self.config_dir.exists():
+            self.config_dir.mkdir(parents=True)
+        
+        # Create default config if file doesn't exist
+        if not self.config_file.exists():
+            return self.defaults.copy()
+        
+        # Load config from file
+        try:
+            with open(self.config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Ensure all default keys exist
+            for key, value in self.defaults.items():
+                if key not in config:
+                    config[key] = value
+            
+            return config
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return self.defaults.copy()
+    
+    def save(self):
+        """Save configuration to file."""
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except Exception as e:
+            print(f"Error saving config: {e}")
+    
+    def get(self, key, default=None):
+        """Get a configuration value."""
+        return self.config.get(key, default)
+    
+    def set(self, key, value):
+        """Set a configuration value."""
+        self.config[key] = value
+        self.save()
+    
+    def add_recent_connection(self, connection_details):
+        """Add a connection to the recent connections list."""
+        # Remove password for security
+        connection_copy = connection_details.copy()
+        if "password" in connection_copy:
+            connection_copy["password"] = ""  # Clear password
+        
+        # Add to recent connections
+        recent = self.config.get("recent_connections", [])
+        
+        # Remove if already exists
+        recent = [c for c in recent if not (
+            c.get("host") == connection_copy.get("host") and
+            c.get("port") == connection_copy.get("port") and
+            c.get("dbname") == connection_copy.get("dbname") and
+            c.get("user") == connection_copy.get("user")
+        )]
+        
+        # Add to beginning of list
+        recent.insert(0, connection_copy)
+        
+        # Limit to 10 recent connections
+        recent = recent[:10]
+        
+        # Update config
+        self.config["recent_connections"] = recent
+        self.save()
+    
+    def add_query_history(self, query):
+        """Add a query to the history."""
+        # Get existing history
+        history = self.config.get("query_history", [])
+        
+        # Remove if already exists
+        if query in history:
+            history.remove(query)
+        
+        # Add to beginning of list
+        history.insert(0, query)
+        
+        # Limit to 50 queries
+        history = history[:50]
+        
+        # Update config
+        self.config["query_history"] = history
+        self.save()
+    
+    def get_query_history(self):
+        """Get the query history."""
+        return self.config.get("query_history", [])
+    
+    def get_recent_connections(self):
+        """Get the recent connections."""
+        return self.config.get("recent_connections", [])
 
 ========== FILE: /Users/ccmaloney/Documents/Projects/pg_data_explorer/src/data_explorer/__init__.py ==========
 
@@ -206,6 +1724,7 @@ import sys
 from PySide6 import QtWidgets
 from data_explorer.ui.main_window import MainWindow
 
+
 def run():
     """
     Initializes and runs the Qt application.
@@ -219,6 +1738,7 @@ def run():
 
     # Run the application's event loop
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     # This ensures the run function is called only when the script is executed directly

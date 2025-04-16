@@ -2,6 +2,7 @@ import sys
 from PySide6 import QtWidgets
 from data_explorer.ui.main_window import MainWindow
 
+
 def run():
     """
     Initializes and runs the Qt application.
@@ -15,6 +16,7 @@ def run():
 
     # Run the application's event loop
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     # This ensures the run function is called only when the script is executed directly
